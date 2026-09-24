@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>代币领取 · LightChain</title>
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside id="sidebar"></aside>
+  <div class="main">
+    <header id="topbar"></header>
+    <main class="content">
+      <div class="page-head">
+        <h1>代币领取（资格证明空投）</h1>
+        <p>完整流程：① 项目方生成资格根并部署注资 → ② 名单内地址凭证明在截止高度前各领一份 → ③ 截止后项目方一次性回收剩余。</p>
+      </div>
+
+      <!-- ① 创建领取活动 -->
+      <div class="card">
+        <h2>① 创建领取活动 <span class="hint">名单 → 默克尔根 → 部署 → 注资</span></h2>
+        <div class="grid" style="grid-template-columns: 1.2fr 1fr;">
+          <div>
+            <div class="field"><label>资格名单（每行一个地址，重复与顺序不影响结果）</label>
+              <textarea id="addrList" class="mono" rows="7" spellcheck="false"
+                oninput="saveList();updateListCount()"
+                style="width:100%;font-size:12px;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:10px;"
+                placeholder="0x...\n0x..."></textarea></div>
+            <div class="flex">
+              <button class="btn ghost sm" onclick="fillMyWallets()">📥 填入本地钱包地址</button>
+              <button class="btn primary sm" onclick="genRoot()">🌳 生成资格根</button>
+              <div class="spacer"></div>
+              <span class="badge blue sm" id="listCount">0 个地址</span>
+            </div>
+            <div id="rootResult" style="margin-top:10px;"></div>
+          </div>
+          <div>
+            <div class="row">
+              <div class="field"><label>每份领取数量（固定）</label>
+                <input id="claimAmount" type="number" min="1" step="1" value="10" oninput="suggestPool()"></div>
+              <div class="field"><label>截止高度（含该高度）<span class="hint" id="heightHint"></span></label>
+                <input id="deadline" type="number" min="1" step="1" value="100"></div>
+            </div>
+            <div class="row">
+              <div class="field"><label>部署账户（项目方）</label><select id="deployFrom"></select></div>
+              <div class="field"><label>注入资金池数量</label>
+                <input id="poolAmount" type="number" min="0" step="any" value="0"></div>
+            </div>
+            <button class="btn green" style="width:100%;" onclick="deployAirdrop()">🚀 部署合约并注入资金</button>
+            <div class="hint" style="margin-top:8px;">部署会自动出块确认，随后以附带 value 调用 fund() 完成注资。</div>
+          </div>
+        </div>
+        <div id="deployResult" style="margin-top:10px;"></div>
+      </div>
+
+      <!-- ② 领取进度 -->
+      <div class="card" style="margin-top:16px;">
+        <div class="flex">
+          <h2 style="margin:0;">② 领取进度 <span class="hint">每 5 秒自动刷新</span></h2>
+          <select id="airdropSelect" style="max-width:320px;" onchange="selectAirdrop(this.value)"></select>
+          <button class="btn ghost sm" onclick="refreshContracts()">刷新</button>
+          <div class="spacer"></div>
+          <span id="airdropStatus"></span>
+        </div>
+        <div id="statsBody" style="margin-top:14px;"><div class="empty">尚未选择领取活动</div></div>
+      </div>
+
+      <div class="grid cols-2" style="margin-top:16px;">
+        <!-- ③ 领取代币 -->
+        <div class="card">
+          <h2>③ 领取代币 <span class="hint">名单内地址 · 每地址限领一份</span></h2>
+          <div class="field"><label>领取钱包（须为名单内地址）</label><select id="claimFrom"></select></div>
+          <div class="flex">
+            <button class="btn" onclick="checkEligibility()">🔍 检查资格</button>
+            <button class="btn green" onclick="doClaim()">🎁 立即领取</button>
+          </div>
+          <div class="hint" style="margin:8px 0;">资格名单取自第 ① 步的地址列表；领取前会先模拟执行，重复领取 / 不在名单 / 已过截止高度都会被拒绝并提示原因。</div>
+          <div id="claimResult" style="margin-top:10px;"></div>
+        </div>
+
+        <!-- ④ 过期回收 -->
+        <div class="card">
+          <h2>④ 过期回收 <span class="hint">截止高度之后 · 仅项目方</span></h2>
+          <div class="field"><label>项目方钱包（须为部署账户）</label><select id="reclaimFrom"></select></div>
+          <button class="btn danger" onclick="doReclaim()">♻ 回收剩余代币</button>
+          <div class="hint" style="margin:8px 0;">截止高度过后，项目方可把尚未被领走的剩余代币一次性收回；回收后领取入口永久关闭。</div>
+          <div id="reclaimResult" style="margin-top:10px;"></div>
+        </div>
+      </div>
+
+      <!-- ⑤ 领取记录 -->
+      <div class="card" style="margin-top:16px;">
+        <h2>⑤ 领取记录 <span class="hint" id="recordHint">链上事件，清晰可查</span></h2>
+        <div id="recordList"><div class="empty">暂无记录</div></div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<script src="/static/js/api.js"></script>
+<script src="/static/js/app.js"></script>
+<script>
+window.PAGE = "airdrop";
+let wallets = [];
+let contracts = [];        // 仅 merkle_airdrop 合约
+let current = null;        // 当前选中的合约地址
+let currentStats = null;
+let tplSource = null;
+
+async function init() {
+  await loadWallets();
+  await loadTemplate();
+  restoreList();
+  await refreshContracts();
+  const st = await API.get("/api/node/status").catch(() => null);
+  if (st) {
+    $("#heightHint").textContent = `（当前 #${st.height}）`;
+    $("#deadline").value = st.height + 50;
+  }
+  pollStatus(5000);
+  setInterval(refreshDashboard, 5000);
+}
+
+/* ---------------- 钱包 / 模板 / 名单 ---------------- */
+async function loadWallets() {
+  const d = await API.get("/api/wallet/list");
+  wallets = d.wallets;
+  const opts = wallets.map((w, i) =>
+    `<option value="${i}">${esc(w.label || fmt.addr(w.address, 6))} (${fmt.addr(w.address, 5)})</option>`).join("");
+  $("#deployFrom").innerHTML = opts;
+  $("#claimFrom").innerHTML = opts;
+  $("#reclaimFrom").innerHTML = opts;
+}
+
+async function loadTemplate() {
+  const d = await API.get("/api/templates/merkle_airdrop");
+  tplSource = d.template.source;
+}
+
+function parseList() {
+  return $("#addrList").value.split("\n").map(s => s.trim()).filter(Boolean);
+}
+
+function restoreList() {
+  const saved = localStorage.getItem("lc_airdrop_list");
+  if (saved) $("#addrList").value = saved;
+  updateListCount();
+}
+
+function saveList() {
+  localStorage.setItem("lc_airdrop_list", $("#addrList").value);
+}
+
+function updateListCount() {
+  $("#listCount").textContent = parseList().length + " 个地址";
+}
+
+function fillMyWallets() {
+  const have = new Set(parseList().map(a => a.toLowerCase()));
+  const lines = parseList();
+  for (const w of wallets) {
+    if (!have.has(w.address.toLowerCase())) lines.push(w.address);
+  }
+  $("#addrList").value = lines.join("\n");
+  saveList(); updateListCount();
+  toast("已填入本地钱包地址", "ok");
+}
+
+/* ---------------- ① 创建 ---------------- */
+async function genRoot() {
+  const addresses = parseList();
+  if (!addresses.length) return toast("请先填写资格名单", "err");
+  saveList(); updateListCount();
+  try {
+    const d = await API.post("/api/airdrop/root", { addresses });
+    $("#rootResult").innerHTML = `
+      <div class="kv">
+        <dt>资格根</dt><dd class="hash">${esc(d.root)}</dd>
+        <dt>有效地址</dt><dd class="mono-num">${d.count} 个（已去重排序）</dd>
+      </div>`;
+    suggestPool();
+    return d;
+  } catch (e) { toast(e.message, "err"); return null; }
+}
+
+function suggestPool() {
+  const n = parseList().length;
+  const amt = parseInt($("#claimAmount").value || 0);
+  if (n && amt > 0) $("#poolAmount").value = n * amt;
+}
+
+async function deployAirdrop() {
+  const w = wallets[Number($("#deployFrom").value || 0)];
+  if (!w) return toast("请先在钱包页创建钱包", "err");
+  const addresses = parseList();
+  if (!addresses.length) return toast("请先填写资格名单", "err");
+  const amount = parseInt($("#claimAmount").value);
+  const deadline = parseInt($("#deadline").value);
+  const pool = parseFloat($("#poolAmount").value || 0);
+  if (!(amount > 0)) return toast("每份数量必须为正整数", "err");
+  if (!(deadline > 0)) return toast("截止高度必须为正整数", "err");
+  if (!tplSource) await loadTemplate();
+
+  const rootD = await genRoot();          // 部署前重算，保证名单与根一致
+  if (!rootD) return;
+  try {
+    const dep = await API.post("/api/contract/deploy", {
+      sender: w.address, code: tplSource,
+      constructor: [rootD.root, amount, deadline], fee: 0,
+    });
+    if (!dep.ok) return toast("部署失败: " + dep.reason, "err");
+    toast("部署交易已提交，正在出块确认…", "info");
+    await API.post("/api/mine", { miner: w.address });
+    let fundNote = "未注资";
+    if (pool > 0) {
+      const fund = await API.post(`/api/contract/${dep.address}/invoke`, {
+        function: "fund", args: [], sender: w.address, value: pool, fee: 0, mine: true,
+      });
+      fundNote = fund.ok ? `已注资 ${fmt.amount(pool)}` : "注资失败: " + fund.reason;
+    }
+    $("#deployResult").innerHTML = `
+      <div class="flex"><span class="badge green">✓ 活动已创建</span>
+        <span class="badge blue">${esc(fundNote)}</span></div>
+      <div class="kv" style="margin-top:8px;">
+        <dt>合约地址</dt><dd class="hash">${esc(dep.address)}</dd>
+        <dt>资格根</dt><dd class="hash">${esc(rootD.root)}</dd>
+        <dt>参数</dt><dd>每份 ${amount} · 截止高度 #${deadline} · 名单 ${rootD.count} 人</dd>
+      </div>`;
+    localStorage.setItem("lc_airdrop_contract", dep.address);
+    await refreshContracts();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+/* ---------------- ② 进度 ---------------- */
+async function refreshContracts() {
+  const d = await API.get("/api/contract/list");
+  contracts = d.contracts.filter(c =>
+    c.storage && c.storage.merkle_root && c.storage.claim_amount !== undefined);
+  const sel = $("#airdropSelect");
+  if (!contracts.length) {
+    sel.innerHTML = `<option value="">暂无领取活动</option>`;
+    current = null; currentStats = null;
+    $("#statsBody").innerHTML = `<div class="empty">尚未部署领取活动，请先在第 ① 步创建</div>`;
+    $("#airdropStatus").innerHTML = "";
+    return;
+  }
+  sel.innerHTML = contracts.map(c =>
+    `<option value="${c.address}">${fmt.addr(c.address, 10)}</option>`).join("");
+  const want = new URLSearchParams(location.search).get("addr")
+    || localStorage.getItem("lc_airdrop_contract");
+  if (want && contracts.some(c => c.address === want)) sel.value = want;
+  await selectAirdrop(sel.value);
+}
+
+async function selectAirdrop(addr) {
+  if (!addr) return;
+  current = addr;
+  localStorage.setItem("lc_airdrop_contract", addr);
+  await refreshDashboard();
+}
+
+async function refreshDashboard() {
+  if (!current) return;
+  try {
+    const d = await API.post(`/api/contract/${current}/call`,
+      { function: "stats", args: [] });
+    if (!d.ok) return;
+    currentStats = d.return;
+    renderStats(currentStats);
+    await refreshRecords();
+  } catch (e) { /* 节点暂不可达 */ }
+}
+
+function renderStats(s) {
+  const ended = s.current_height > s.deadline;
+  const status = s.reclaimed
+    ? `<span class="badge amber">已回收</span>`
+    : ended ? `<span class="badge red">已截止</span>`
+            : `<span class="badge green">开放中</span>`;
+  $("#airdropStatus").innerHTML = status;
+  const pool = s.total_claimed + s.remaining;
+  const pct = pool > 0 ? Math.round(s.total_claimed / pool * 100) : 0;
+  $("#statsBody").innerHTML = `
+    <div class="grid cols-4">
+      <div class="stat accent"><div class="label">当前高度 / 截止高度</div>
+        <div class="value small">#${s.current_height} / #${s.deadline}</div></div>
+      <div class="stat green"><div class="label">已领走</div>
+        <div class="value small">${fmt.amount(s.total_claimed)}</div>
+        <div class="delta">${s.claimed_count} 份 × ${fmt.amount(s.claim_amount)}</div></div>
+      <div class="stat amber"><div class="label">剩余可领</div>
+        <div class="value small">${fmt.amount(s.remaining)}</div>
+        <div class="delta">${s.remaining > 0 ? "约 " + Math.floor(s.remaining / s.claim_amount) + " 份" : "已领完或已回收"}</div></div>
+      <div class="stat purple"><div class="label">项目方</div>
+        <div class="value small addr" style="font-size:13px;">${fmt.addr(s.owner, 6)}</div></div>
+    </div>
+    <div style="margin-top:14px;">
+      <div class="flex small muted"><span>领取进度 ${pct}%</span><span class="spacer"></span>
+        <span>${fmt.amount(s.total_claimed)} / ${fmt.amount(pool)}</span></div>
+      <div style="height:10px;border-radius:6px;background:var(--panel-2);border:1px solid var(--border);overflow:hidden;margin-top:6px;">
+        <div style="height:100%;width:${pct}%;background:linear-gradient(90deg,var(--green),var(--accent-2));"></div>
+      </div>
+    </div>
+    <div class="small muted" style="margin-top:10px;">合约 <span class="hash">${esc(current)}</span>
+      · 资格根 <span class="hash">${esc(s.merkle_root.slice(0, 16))}…</span>
+      · <a href="interact.html?addr=${esc(current)}" style="color:var(--accent);">在合约交互页打开 →</a></div>`;
+}
+
+/* ---------------- ③ 领取 ---------------- */
+async function getProofFor(walletAddr) {
+  const addresses = parseList();
+  if (!addresses.length) { toast("请先在第 ① 步填写资格名单", "err"); return null; }
+  try {
+    const d = await API.post("/api/airdrop/proof", { addresses, address: walletAddr });
+    return d;
+  } catch (e) { return { error: e.message }; }
+}
+
+async function checkEligibility() {
+  const w = wallets[Number($("#claimFrom").value || 0)];
+  if (!w) return toast("请先创建钱包", "err");
+  const d = await getProofFor(w.address);
+  if (!d) return;
+  if (d.error) {
+    $("#claimResult").innerHTML = `<span class="badge red">✗ ${esc(d.error)}</span>`;
+    return;
+  }
+  let extra = "";
+  if (current && currentStats) {
+    const match = d.root === currentStats.merkle_root;
+    const hc = await API.post(`/api/contract/${current}/call`,
+      { function: "has_claimed", args: [w.address], sender: w.address });
+    extra = `
+      <dt>与当前活动根匹配</dt><dd>${match ? "✅ 是" : "❌ 否（名单与合约不一致）"}</dd>
+      <dt>是否已领取</dt><dd>${hc.ok && hc.return ? "⚠️ 已领取过" : "未领取"}</dd>`;
+  }
+  $("#claimResult").innerHTML = `
+    <div class="flex"><span class="badge green">✓ 在名单中</span>
+      <span class="muted small">证明路径 ${d.proof.length} 步</span></div>
+    <div class="kv" style="margin-top:8px;">${extra}</div>`;
+}
+
+async function doClaim() {
+  const w = wallets[Number($("#claimFrom").value || 0)];
+  if (!w) return toast("请先创建钱包", "err");
+  if (!current) return toast("请先在第 ② 步选择领取活动", "err");
+  const d = await getProofFor(w.address);
+  if (!d) return;
+  if (d.error) {
+    $("#claimResult").innerHTML = `<span class="badge red">✗ 被拒绝：${esc(d.error)}</span>`;
+    return;
+  }
+  try {
+    // 预检：先模拟执行，重复领取 / 截止 / 余额不足会在此直接暴露原因
+    const sim = await API.post(`/api/contract/${current}/call`,
+      { function: "claim", args: [d.proof], sender: w.address });
+    if (!sim.ok) {
+      $("#claimResult").innerHTML = `<span class="badge red">✗ 被拒绝：${esc(sim.error)}</span>`;
+      return;
+    }
+    const r = await API.post(`/api/contract/${current}/invoke`,
+      { function: "claim", args: [d.proof], sender: w.address, value: 0, fee: 0, mine: true });
+    if (!r.ok) {
+      $("#claimResult").innerHTML = `<span class="badge red">✗ 提交失败：${esc(r.reason)}</span>`;
+      return;
+    }
+    $("#claimResult").innerHTML = `
+      <div class="flex"><span class="badge green">✓ 领取成功</span>
+        <span class="muted small">tx ${fmt.hash(r.txid, 8)}</span></div>
+      <div class="kv" style="margin-top:8px;">
+        <dt>领取地址</dt><dd class="addr">${esc(w.address)}</dd>
+        <dt>领取数量</dt><dd class="mono-num">${fmt.amount(currentStats ? currentStats.claim_amount : "")}</dd>
+      </div>`;
+    toast("领取成功，记录已上链", "ok");
+    await refreshDashboard();
+    renderTopbar();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+/* ---------------- ④ 回收 ---------------- */
+async function doReclaim() {
+  const w = wallets[Number($("#reclaimFrom").value || 0)];
+  if (!w) return toast("请先创建钱包", "err");
+  if (!current) return toast("请先在第 ② 步选择领取活动", "err");
+  try {
+    const sim = await API.post(`/api/contract/${current}/call`,
+      { function: "reclaim", args: [], sender: w.address });
+    if (!sim.ok) {
+      $("#reclaimResult").innerHTML = `<span class="badge red">✗ 被拒绝：${esc(sim.error)}</span>`;
+      return;
+    }
+    const r = await API.post(`/api/contract/${current}/invoke`,
+      { function: "reclaim", args: [], sender: w.address, value: 0, fee: 0, mine: true });
+    if (!r.ok) {
+      $("#reclaimResult").innerHTML = `<span class="badge red">✗ 提交失败：${esc(r.reason)}</span>`;
+      return;
+    }
+    $("#reclaimResult").innerHTML = `<span class="badge green">✓ 剩余代币已回收至项目方</span>`;
+    toast("回收完成", "ok");
+    await refreshDashboard();
+    renderTopbar();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+/* ---------------- ⑤ 记录 ---------------- */
+async function refreshRecords() {
+  if (!current) return;
+  const d = await API.get(`/api/contract/${current}/events`);
+  const events = (d.events || []).slice().reverse();
+  $("#recordHint").textContent = `（${events.length} 条链上事件）`;
+  const box = $("#recordList");
+  if (!events.length) { box.innerHTML = `<div class="empty">暂无记录</div>`; return; }
+  const badge = { Claimed: "green", Funded: "blue", Reclaimed: "amber",
+                  AirdropCreated: "purple" };
+  box.innerHTML = `<div class="table-wrap"><table><thead><tr>
+    <th>高度</th><th>事件</th><th>明细</th><th>交易</th></tr></thead>
+    <tbody>${events.map(e => `
+      <tr>
+        <td class="mono-num">#${e.height}</td>
+        <td><span class="badge ${badge[e.event] || "blue"} sm">${esc(e.event)}</span></td>
+        <td class="small">${esc(describe(e))}</td>
+        <td class="hash">${fmt.hash(e.txid, 8)}</td>
+      </tr>`).join("")}</tbody></table></div>`;
+}
+
+function describe(e) {
+  const d = e.data || {};
+  if (e.event === "Claimed")
+    return `${fmt.addr(d.address, 8)} 领取 ${fmt.amount(d.amount)}（第 ${d.seq} 份）`;
+  if (e.event === "Funded")
+    return `${fmt.addr(d.frm, 8)} 注入 ${fmt.amount(d.amount)}，池余额 ${fmt.amount(d.balance)}`;
+  if (e.event === "Reclaimed")
+    return `项目方回收剩余 ${fmt.amount(d.amount)}`;
+  if (e.event === "AirdropCreated")
+    return `创建活动：每份 ${fmt.amount(d.claim_amount)}，截止高度 #${d.deadline}`;
+  return JSON.stringify(d);
+}
+
+document.addEventListener("DOMContentLoaded", init);
+</script>
+</body>
+</html>

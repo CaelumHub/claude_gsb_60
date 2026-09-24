@@ -48,6 +48,115 @@ def total_supply():
 ''',
     },
     {
+        "name": "merkle_airdrop",
+        "title": "代币领取（资格证明空投）",
+        "category": "金融",
+        "description": "项目方把白名单的默克尔根与每份固定数量、截止高度写入合约并注入代币；"
+                       "名单内地址凭资格证明在截止高度前各领一份（仅限一次），"
+                       "每次领取都记录事件；截止后项目方可一次性回收剩余代币。",
+        "constructor": [
+            {"name": "merkle_root", "type": "string",
+             "desc": "资格名单的默克尔根（由地址列表生成，可在代币领取页计算）"},
+            {"name": "claim_amount", "type": "int", "desc": "每个地址可领取的固定数量"},
+            {"name": "deadline", "type": "int", "desc": "领取截止的区块高度（含该高度）"},
+        ],
+        "functions": [
+            {"name": "fund", "desc": "项目方注入待发放代币（需附带 value）", "params": []},
+            {"name": "claim", "desc": "凭资格证明领取固定数量（每地址限一次）", "params": ["proof"]},
+            {"name": "reclaim", "desc": "截止后项目方一次性回收剩余代币", "params": []},
+            {"name": "stats", "desc": "查询已领/剩余/截止高度等进度", "params": []},
+            {"name": "has_claimed", "desc": "查询某地址是否已领取", "params": ["addr"]},
+            {"name": "verify", "desc": "校验某地址的资格证明是否有效", "params": ["address", "proof"]},
+        ],
+        "source": '''# 代币领取模板（默克尔资格证明 + 截止高度 + 过期回收）
+# 哈希方案（与后端 backend/airdrop.py 完全一致）：
+#   叶子 = sha256(地址小写)；父节点 = sha256(左子 || 右子)
+# 部署后项目方需先调用 fund() 并附带 value，注入待发放的代币池。
+
+def init(merkle_root, claim_amount, deadline):
+    require(state.get("owner") is None, "已初始化")
+    require(int(claim_amount) > 0, "每份数量必须为正")
+    require(int(deadline) > 0, "截止高度必须为正")
+    state["owner"] = msg.sender
+    state["merkle_root"] = str(merkle_root)
+    state["claim_amount"] = int(claim_amount)
+    state["deadline"] = int(deadline)
+    state["claimed_count"] = 0
+    state["total_claimed"] = 0
+    state["reclaimed"] = False
+    emit("AirdropCreated", owner=msg.sender, merkle_root=str(merkle_root),
+         claim_amount=int(claim_amount), deadline=int(deadline))
+
+def _leaf_root(address, proof):
+    # 从叶子（地址哈希）沿证明路径折叠，返回计算出的根。
+    node = sha256_hex(address)
+    for step in proof:
+        require(step["dir"] in ("L", "R"), "证明中的方向非法")
+        sib = step["hash"]
+        if step["dir"] == "R":
+            node = sha256_hex(bytes.fromhex(node) + bytes.fromhex(sib))
+        else:
+            node = sha256_hex(bytes.fromhex(sib) + bytes.fromhex(node))
+    return node
+
+def fund():
+    require(msg.value > 0, "注入金额必须为正")
+    emit("Funded", frm=msg.sender, amount=msg.value, balance=this_balance())
+
+def claim(proof):
+    require(state.get("reclaimed") is False, "活动已结束并被回收")
+    require(block_height <= state["deadline"], "已过截止高度，领取关闭")
+    require(state.get("claimed_" + msg.sender, False) is False,
+            "该地址已领取过，不能重复领取")
+    require(len(proof) <= 64, "证明路径过长")
+    require(_leaf_root(msg.sender, proof) == state["merkle_root"],
+            "资格证明无效：地址不在名单或证明错误")
+    amount = state["claim_amount"]
+    require(this_balance() >= amount, "合约余额不足，请联系项目方注入代币")
+    state["claimed_" + msg.sender] = True
+    state["claimed_count"] = state["claimed_count"] + 1
+    state["total_claimed"] = state["total_claimed"] + amount
+    transfer(msg.sender, amount)
+    emit("Claimed", address=msg.sender, amount=amount,
+         height=block_height, seq=state["claimed_count"])
+
+def reclaim():
+    require(msg.sender == state["owner"], "只有项目方可回收")
+    require(block_height > state["deadline"], "未到截止高度，暂不能回收")
+    require(state["reclaimed"] is False, "已回收过，不能重复回收")
+    state["reclaimed"] = True
+    remaining = this_balance()
+    if remaining > 0:
+        transfer(state["owner"], remaining)
+    emit("Reclaimed", owner=state["owner"], amount=remaining,
+         height=block_height)
+
+def stats():
+    return {
+        "owner": state["owner"],
+        "merkle_root": state["merkle_root"],
+        "claim_amount": state["claim_amount"],
+        "deadline": state["deadline"],
+        "current_height": block_height,
+        "open": block_height <= state["deadline"]
+                and state["reclaimed"] is False,
+        "claimed_count": state["claimed_count"],
+        "total_claimed": state["total_claimed"],
+        "remaining": this_balance(),
+        "reclaimed": state["reclaimed"],
+    }
+
+def has_claimed(addr):
+    return state.get("claimed_" + str(addr), False)
+
+def verify(address, proof):
+    try:
+        return _leaf_root(str(address), proof) == state["merkle_root"]
+    except:
+        return False
+''',
+    },
+    {
         "name": "kv_store",
         "title": "键值存储",
         "category": "存储",

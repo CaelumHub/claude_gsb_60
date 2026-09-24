@@ -12,6 +12,7 @@ from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 
 from . import crypto
+from .airdrop import normalize_addresses, merkle_root_hex, proof_for
 from .state import ZERO_ADDRESS
 from .storage import read_json, atomic_write_json
 from .transaction import Transaction
@@ -20,7 +21,7 @@ from .templates import template_catalog, get_template, TEMPLATES
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "frontend")
 PAGES = ["index", "wallet", "txpool", "explorer", "deploy", "interact",
-         "nodes", "network", "stats", "admin", "templates"]
+         "nodes", "network", "stats", "admin", "templates", "airdrop"]
 
 
 def _json(payload, status=200):
@@ -450,6 +451,43 @@ def create_app(node):
     def contract_events(addr):
         events = read_json(node.paths.contract_path(addr), {}).get("events", [])
         return _json({"events": events})
+
+    # ================================================================== #
+    # Token claim (merkle airdrop) helpers
+    # ================================================================== #
+    @app.post("/api/airdrop/root")
+    def airdrop_root():
+        """Compute the eligibility Merkle root for an address list."""
+        data = request.get_json(force=True, silent=True) or {}
+        try:
+            addrs = normalize_addresses(data.get("addresses", []))
+        except ValueError as e:
+            return _json({"ok": False, "error": str(e)}, 400)
+        if not addrs:
+            return _json({"ok": False, "error": "名单为空"}, 400)
+        return _json({"ok": True, "root": merkle_root_hex(addrs),
+                      "count": len(addrs), "addresses": addrs})
+
+    @app.post("/api/airdrop/proof")
+    def airdrop_proof():
+        """Return the Merkle proof for one address of the given list."""
+        data = request.get_json(force=True, silent=True) or {}
+        try:
+            addrs = normalize_addresses(data.get("addresses", []))
+        except ValueError as e:
+            return _json({"ok": False, "error": str(e)}, 400)
+        if not addrs:
+            return _json({"ok": False, "error": "名单为空"}, 400)
+        target = str(data.get("address", "")).strip().lower()
+        if not crypto.is_valid_address(target):
+            return _json({"ok": False, "error": "invalid address"}, 400)
+        found = proof_for(addrs, target)
+        if not found:
+            return _json({"ok": False,
+                          "error": "该地址不在名单中，无领取资格"}, 404)
+        index, proof = found
+        return _json({"ok": True, "root": merkle_root_hex(addrs),
+                      "index": index, "proof": proof})
 
     # ================================================================== #
     # Templates
