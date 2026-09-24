@@ -16,10 +16,33 @@ so the state root in the block header covers contract storage as well.
 """
 
 import copy
+import hashlib
 import json
 
 from . import crypto
 from .sandbox import SandboxError, exec_restricted, call_function, validate_source
+
+
+def _sandbox_sha256_hex(data) -> str:
+    """SHA-256 of a contract string (hex digest), e.g. for Merkle leaves."""
+    if isinstance(data, bytes):
+        return hashlib.sha256(data).hexdigest()
+    if isinstance(data, (int, float, bool)):
+        data = str(data)
+    if not isinstance(data, str):
+        raise SandboxError("sha256_hex expects a string argument")
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+
+def _sandbox_sha256_pair_hex(left, right) -> str:
+    """SHA-256 of two concatenated hex hashes — one Merkle node up."""
+    if not (isinstance(left, str) and isinstance(right, str)):
+        raise SandboxError("sha256_pair_hex expects two hex strings")
+    try:
+        blob = bytes.fromhex(left) + bytes.fromhex(right)
+    except ValueError:
+        raise SandboxError("sha256_pair_hex arguments must be hex strings")
+    return hashlib.sha256(blob).hexdigest()
 
 
 # --------------------------------------------------------------------------- #
@@ -148,6 +171,8 @@ class ContractEngine:
             "balance_of": balance_of,
             "this_balance": this_balance,
             "block_height": height,
+            "sha256_hex": _sandbox_sha256_hex,
+            "sha256_pair_hex": _sandbox_sha256_pair_hex,
         }
         return context, events, transfers
 

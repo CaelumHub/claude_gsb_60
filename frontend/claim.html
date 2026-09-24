@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>代币空投领取 · LightChain</title>
+<link rel="stylesheet" href="/static/css/style.css">
+<style>
+  .progress-wrap { height: 10px; border-radius: 6px; background: var(--panel-2);
+    border: 1px solid var(--border); overflow: hidden; margin: 8px 0; }
+  .progress-bar { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    width: 0%; transition: width .4s; }
+  .proof-box { font-size: 11px; word-break: break-all; max-height: 120px; overflow: auto; }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside id="sidebar"></aside>
+  <div class="main">
+    <header id="topbar"></header>
+    <main class="content">
+      <div class="page-head">
+        <h1>代币空投领取</h1>
+        <p>项目方按 Merkle 白名单发放固定数量代币：名单内地址凭资格证明领取、每地址限领一次、设有截止高度，过期后项目方可一次性回收剩余代币。</p>
+      </div>
+
+      <!-- ================= 领取面板（任何持币用户） ================= -->
+      <div class="card">
+        <div class="flex">
+          <h2 style="margin:0;">🎁 领取代币</h2>
+          <span class="spacer"></span>
+          <button class="btn ghost sm" onclick="refreshInfo()">刷新状态</button>
+        </div>
+        <div class="row" style="margin-top:10px;">
+          <div class="field grow"><label>领取合约地址</label>
+            <select id="claimContract" style="width:100%;" onchange="refreshInfo()"></select></div>
+          <div class="field"><label>领取账户（本地钱包）</label>
+            <select id="claimFrom"></select></div>
+        </div>
+
+        <div class="grid" style="grid-template-columns: repeat(4, 1fr); margin-top:6px;">
+          <div class="stat"><div class="label">单地址可领</div><div class="value" id="sAmount">—</div></div>
+          <div class="stat green"><div class="label">已领 / 名额</div><div class="value small" id="sClaimed">—</div></div>
+          <div class="stat amber"><div class="label">剩余名额</div><div class="value" id="sRemain">—</div></div>
+          <div class="stat purple"><div class="label">当前 / 截止高度</div><div class="value small" id="sHeight">—</div></div>
+        </div>
+        <div class="progress-wrap"><div class="progress-bar" id="claimProgress"></div></div>
+        <div class="flex">
+          <span class="badge gray" id="sStatus">—</span>
+          <span class="spacer"></span>
+          <span class="muted small" id="sBalance"></span>
+        </div>
+
+        <hr class="divider">
+        <div class="field"><label>白名单（领取证明用：每行一个地址，须与项目方发布的是同一份名单）</label>
+          <textarea id="wlInput" rows="4" class="mono" style="width:100%;font-size:12px;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:10px;"
+            placeholder="0xaaaa...&#10;0xbbbb...&#10;也可点击「使用本地钱包地址」自动填充"></textarea></div>
+        <div class="flex">
+          <button class="btn sm" onclick="fillLocalWallets()">用本地钱包地址填充</button>
+          <button class="btn sm" onclick="buildProof()">🔐 生成我的资格证明</button>
+          <div class="spacer"></div>
+          <label class="small muted" style="display:flex;align-items:center;gap:4px;">
+            <input type="checkbox" id="autoMineChk" checked style="width:auto;"> 交易后立即出块</label>
+          <button class="btn green" onclick="doClaim()">✍ 提交领取</button>
+        </div>
+        <div id="proofOut" style="margin-top:10px;"></div>
+      </div>
+
+      <div class="grid cols-2" style="margin-top:16px;">
+        <!-- ================= 领取记录 ================= -->
+        <div class="card">
+          <h2>📜 领取记录</h2>
+          <p class="hint" style="margin:4px 0;">链上事件，每次领取都可查、不可抵赖。</p>
+          <div id="claimLog" style="max-height:360px; overflow:auto;"></div>
+        </div>
+
+        <!-- ================= 项目方：回收 ================= -->
+        <div class="card">
+          <h2>♻️ 项目方：过期回收剩余代币</h2>
+          <p class="hint" style="margin:4px 0;">只有合约部署者（项目方）可操作，且必须在截止高度之后。</p>
+          <div class="field"><label>操作账户（须为项目方）</label>
+            <select id="ownerFrom"></select></div>
+          <button class="btn danger" onclick="doRecover()">一次性收回剩余代币</button>
+          <div id="recoverOut" style="margin-top:10px;"></div>
+        </div>
+      </div>
+
+      <!-- ================= 项目方：部署活动 ================= -->
+      <div class="card" style="margin-top:16px;">
+        <h2>🏗 项目方：发起一期领取活动</h2>
+        <div class="grid" style="grid-template-columns: 1.2fr 1fr;">
+          <div>
+            <div class="field"><label>① 白名单地址（每行一个，或用逗号分隔）</label>
+              <textarea id="depWl" rows="5" class="mono" style="width:100%;font-size:12px;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:10px;"></textarea></div>
+            <div class="flex">
+              <button class="btn sm" onclick="fillDeployLocal()">用本地钱包填充</button>
+              <button class="btn primary sm" onclick="buildRoot()">① 计算 Merkle 根</button>
+            </div>
+            <div id="rootOut" class="small" style="margin-top:8px;"></div>
+          </div>
+          <div>
+            <div class="field"><label>部署账户（项目方）</label>
+              <select id="depFrom"></select></div>
+            <div class="row">
+              <div class="field grow"><label>② 每地址领取数量</label>
+                <input id="depAmount" type="number" min="1" step="any" value="100"></div>
+              <div class="field grow"><label>截止高度（end_height）</label>
+                <input id="depEnd" type="number" min="1" value="20"></div>
+            </div>
+            <div class="field"><label>③ 预存代币总额（建议 = 单份 × 白名单数量）</label>
+              <input id="depFund" type="number" min="0" step="any" value="0"></div>
+            <div class="field"><label>手续费</label>
+              <input id="depFee" type="number" min="0" step="any" value="0"></div>
+            <button class="btn green" onclick="doDeploy()" style="width:100%;">🚀 部署并预存代币</button>
+            <div id="deployOut" class="small" style="margin-top:8px;"></div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<script src="/static/js/api.js"></script>
+<script src="/static/js/app.js"></script>
+<script>
+window.PAGE = "claim";
+let wallets = [];
+let contracts = [];
+let rootData = null;       // {root, count, addresses, proofs}
+let myProof = null;        // proof list for current claimer
+
+async function init() {
+  await loadWallets();
+  await loadContracts();
+  await refreshInfo();
+  pollStatus(6000);
+  setInterval(refreshInfo, 6000);
+}
+
+async function loadWallets() {
+  const d = await API.get("/api/wallet/list");
+  wallets = d.wallets;
+  const opts = wallets.map((w, i) =>
+    `<option value="${i}">${esc(w.label || fmt.addr(w.address, 6))} · ${fmt.addr(w.address, 5)}</option>`).join("");
+  $("#claimFrom").innerHTML = opts;
+  $("#ownerFrom").innerHTML = opts;
+  $("#depFrom").innerHTML = opts;
+}
+
+/* 只列出能识别为领取合约的部署（存储里含 merkle_root 键） */
+async function loadContracts() {
+  const d = await API.get("/api/contract/list");
+  contracts = d.contracts.filter(c => c.storage && c.storage.merkle_root);
+  const sel = $("#claimContract");
+  sel.innerHTML = contracts.length
+    ? contracts.map(c => `<option value="${esc(c.address)}">${fmt.addr(c.address, 10)}</option>`).join("")
+    : `<option value="">（暂无领取合约，先在下方部署）</option>`;
+}
+
+async function curContract() {
+  const addr = $("#claimContract").value;
+  if (!addr) return null;
+  const d = await API.post(`/api/contract/${addr}/call`,
+    { function: "info", args: [], sender: ZERO() });
+  if (!d.ok) return { error: d.error };
+  return { addr, info: d.return };
+}
+
+function ZERO() { return "0x0000000000000000000000000000000000000000"; }
+
+async function refreshInfo() {
+  const c = await curContract();
+  if (!c) return;
+  if (c.error) {
+    $("#sStatus").textContent = "合约读取失败";
+    return;
+  }
+  const i = c.info;
+  $("#sAmount").textContent = fmt.amount(i.amount_each);
+  $("#sClaimed").textContent = `${i.claimed_count} / ${i.total_slots}`;
+  $("#sRemain").textContent = i.remaining_slots;
+  $("#sHeight").textContent = `#${i.current_height} / #${i.end_height}`;
+  $("#sBalance").textContent = `合约余额 ${fmt.amount(i.contract_balance)} LC`;
+  const pct = i.total_slots ? Math.min(100, i.claimed_count / i.total_slots * 100) : 0;
+  $("#claimProgress").style.width = pct.toFixed(1) + "%";
+  const st = $("#sStatus");
+  if (i.recovered) { st.className = "badge gray"; st.textContent = "已结束：剩余代币已回收"; }
+  else if (!i.active) { st.className = "badge red"; st.textContent = "已过截止高度，停止领取"; }
+  else { st.className = "badge green"; st.textContent = "领取进行中"; }
+  loadClaimLog(c.addr);
+}
+
+/* ---------------- 领取 ---------------- */
+function parseWl(text) {
+  return (text || "").split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+}
+
+function fillLocalWallets() {
+  $("#wlInput").value = wallets.map(w => w.address).join("\n");
+}
+function fillDeployLocal() {
+  $("#depWl").value = wallets.map(w => w.address).join("\n");
+}
+
+async function buildProof() {
+  const idx = Number($("#claimFrom").value || 0);
+  const w = wallets[idx];
+  if (!w) return toast("请先生成钱包", "err");
+  const addresses = parseWl($("#wlInput").value);
+  if (!addresses.length) return toast("请填写项目方白名单", "err");
+  try {
+    const d = await API.post("/api/merkle/proof",
+      { address: w.address, addresses });
+    if (!d.ok) {
+      myProof = null;
+      $("#proofOut").innerHTML = `<span class="badge red">✗ ${esc(d.error || "无法生成证明")}</span>`;
+      return;
+    }
+    myProof = d.proof;
+    $("#proofOut").innerHTML = `
+      <span class="badge green">✓ 资格证明已生成（Merkle 根 <span class="mono">${fmt.hash(d.root, 8)}</span>）</span>
+      <pre class="code proof-box" style="margin-top:6px;">${esc(JSON.stringify(d.proof))}</pre>`;
+  } catch (e) {
+    $("#proofOut").innerHTML = `<span class="badge red">✗ ${esc(e.message)}</span>`;
+  }
+}
+
+/* 写入并按选项出块：先提交（服务端不立即打包），短暂等待入池后再单独出块，
+   避免“提交即出块”时交易尚未进入交易池导致的竞争。 */
+async function invokeMined(addr, fn, args, sender, value) {
+  const d = await API.post(`/api/contract/${addr}/invoke`,
+    { function: fn, args, sender, value: value || 0, mine: false });
+  if (d.ok && $("#autoMineChk").checked) {
+    await waitBlock(450);
+    await API.post("/api/mine", { miner: sender });
+    await waitBlock(700);
+  }
+  return d;
+}
+
+async function doClaim() {
+  const addr = $("#claimContract").value;
+  const idx = Number($("#claimFrom").value || 0);
+  const w = wallets[idx];
+  if (!addr) return toast("请先选择/部署领取合约", "err");
+  if (!w) return toast("请先生成钱包", "err");
+  if (!myProof) {
+    toast("请先生成资格证明", "err");
+    await buildProof();
+    if (!myProof) return;
+  }
+  try {
+    const d = await invokeMined(addr, "claim", [myProof], w.address);
+    toast(d.ok ? "领取交易已提交并执行" : (d.reason || "领取被拒绝"), d.ok ? "ok" : "err");
+    if (d.ok) { myProof = null; await refreshInfo(); }
+  } catch (e) { toast(e.message, "err"); }
+}
+
+/* ---------------- 记录 ---------------- */
+async function loadClaimLog(addr) {
+  const box = $("#claimLog");
+  try {
+    const d = await API.get(`/api/contract/${addr}/events`);
+    const evs = (d.events || []).filter(e => ["Claimed", "Recovered", "Deposited",
+      "ClaimCampaignCreated"].includes(e.event));
+    if (!evs.length) { box.innerHTML = `<div class="empty">暂无记录</div>`; return; }
+    box.innerHTML = evs.slice().reverse().map(e => {
+      const color = { Claimed: "green", Recovered: "amber", Deposited: "blue",
+        ClaimCampaignCreated: "purple" }[e.event] || "gray";
+      let detail = "";
+      if (e.event === "Claimed")
+        detail = `领取者 <span class="mono">${fmt.addr(e.data.to, 8)}</span> 领走 ${fmt.amount(e.data.amount)} LC`;
+      else if (e.event === "Recovered")
+        detail = `项目方 <span class="mono">${fmt.addr(e.data.owner, 8)}</span> 收回 ${fmt.amount(e.data.amount)} LC（已领 ${e.data.claimed_count} 份）`;
+      else if (e.event === "Deposited")
+        detail = `充值 ${fmt.amount(e.data.amount)} LC，合约余额 ${fmt.amount(e.data.balance)} LC`;
+      else
+        detail = `单份 ${fmt.amount(e.data.amount_each)} × ${e.data.total_slots} 份，截止高度 #${e.data.end_height}`;
+      return `<div style="padding:8px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;">
+        <div class="flex"><span class="badge ${color}">${esc(e.event)}</span>
+          <span class="muted small">高度 #${e.height}</span>
+          <span class="spacer"></span>
+          <span class="muted small mono" title="${esc(e.txid)}">${fmt.hash(e.txid, 6)}</span></div>
+        <div class="small" style="margin-top:4px;">${detail}</div>
+      </div>`;
+    }).join("");
+  } catch (e) { box.innerHTML = `<div class="empty">记录加载失败</div>`; }
+}
+
+/* ---------------- 项目方回收 ---------------- */
+async function doRecover() {
+  const addr = $("#claimContract").value;
+  const idx = Number($("#ownerFrom").value || 0);
+  const w = wallets[idx];
+  if (!addr || !w) return toast("缺少合约或账户", "err");
+  try {
+    const d = await invokeMined(addr, "recover_remaining", [], w.address);
+    toast(d.ok ? "剩余代币已收回" : (d.reason || "回收被拒绝"), d.ok ? "ok" : "err");
+    if (d.ok) await refreshInfo();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+/* ---------------- 项目方部署 ---------------- */
+async function buildRoot() {
+  const addresses = parseWl($("#depWl").value);
+  if (!addresses.length) return toast("请填写白名单地址", "err");
+  try {
+    const d = await API.post("/api/merkle/whitelist", { addresses });
+    if (!d.ok) { rootData = null; $("#rootOut").innerHTML =
+      `<span class="badge red">✗ ${esc(d.error)}</span>`; return; }
+    rootData = d;
+    $("#rootOut").innerHTML = `
+      <span class="badge green">✓ 白名单 ${d.count} 个地址，Merkle 根：</span>
+      <pre class="code" style="margin-top:6px;font-size:11px;">${esc(d.root)}</pre>`;
+  } catch (e) {
+    rootData = null;
+    $("#rootOut").innerHTML = `<span class="badge red">✗ ${esc(e.message)}</span>`;
+  }
+}
+
+async function doDeploy() {
+  const idx = Number($("#depFrom").value || 0);
+  const w = wallets[idx];
+  if (!w) return toast("请先生成钱包", "err");
+  if (!rootData) { toast("请先计算 Merkle 根", "err"); return; }
+  const amount = parseFloat($("#depAmount").value);
+  const end = parseInt($("#depEnd").value, 10);
+  const fund = parseFloat($("#depFund").value || 0);
+  const fee = parseFloat($("#depFee").value || 0);
+  if (!(amount > 0)) return toast("单地址领取数量必须为正", "err");
+  const status = await API.get("/api/node/status");
+  if (!(end > status.height)) return toast(`截止高度必须大于当前高度 #${status.height}`, "err");
+
+  // 先部署合约
+  let tpl;
+  try {
+    tpl = await API.get("/api/templates/merkle_claim");
+  } catch (e) { return toast("领取合约模板不存在", "err"); }
+  let dep;
+  try {
+    dep = await API.post("/api/contract/deploy", {
+      sender: w.address, code: tpl.template.source, fee,
+      constructor: [rootData.root, amount, rootData.count, end],
+    });
+  } catch (e) { return toast(e.message, "err"); }
+  if (!dep.ok) return toast(dep.reason || dep.error || "部署失败", "err");
+  $("#deployOut").innerHTML = `<span class="badge blue">部署交易已提交，正在出块…</span>`;
+  await waitBlock(450);
+  await API.post("/api/mine", { miner: w.address });
+  await waitBlock(700);
+  await loadContracts();
+  $("#claimContract").value = dep.address;
+
+  // 再预存代币（调用 deposit 并附带 value）
+  if (fund > 0) {
+    const fd = await API.post(`/api/contract/${dep.address}/invoke`,
+      { function: "deposit", args: [], sender: w.address, value: fund, mine: false });
+    if (!fd.ok) return toast("合约已部署，但预存失败：" + (fd.reason || ""), "err");
+    await waitBlock(450);
+    await API.post("/api/mine", { miner: w.address });
+    await waitBlock(700);
+  }
+  $("#deployOut").innerHTML = `
+    <span class="badge green">✓ 活动已创建</span>
+    <div class="small" style="margin-top:6px;">合约 <span class="mono">${esc(dep.address)}</span><br>
+    单份 ${fmt.amount(amount)} × ${rootData.count} 份，截止高度 #${end}，
+    已预存 ${fmt.amount(fund)} LC</div>`;
+  toast("领取活动部署成功", "ok");
+  await refreshInfo();
+}
+
+function waitBlock(ms) { return new Promise(r => setTimeout(r, ms == null ? 700 : ms)); }
+
+document.addEventListener("DOMContentLoaded", init);
+</script>
+</body>
+</html>

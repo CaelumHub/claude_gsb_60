@@ -269,10 +269,15 @@ class Node:
             path = self.paths.contract_path(addr)
             data = read_json(path, {"address": addr, "events": []})
             for e in events:
-                data.setdefault("events", []).append({
+                entry = {
                     "height": height, "txid": r.get("txid"),
                     "event": e.get("event"), "data": e.get("data"),
-                })
+                }
+                # Unique identity per event *instance*: same-named events
+                # (e.g. one "Claimed" per recipient) must all be retained.
+                entry["_uid"] = "{}:{}:{}:{}".format(
+                    height, r.get("txid"), e.get("seq", 0), e.get("event"))
+                data.setdefault("events", []).append(entry)
             data["events"] = data["events"][-2000:]
             dedup = {}
             for entry in data["events"]:

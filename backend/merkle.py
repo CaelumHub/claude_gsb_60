@@ -45,14 +45,16 @@ class MerkleTree:
         self.root = merkle_root(self.leaves)
         self._levels = []
         level = self.leaves
-        if level:
+        # Each retained level reflects the odd-node duplication used to
+        # compute the level above, so proof() indexes siblings safely.
+        while level:
+            if len(level) % 2 == 1 and len(level) > 1:
+                level = level + [level[-1]]
             self._levels.append(level)
-            while len(level) > 1:
-                if len(level) % 2 == 1:
-                    level = level + [level[-1]]
-                level = [_pair(level[i], level[i + 1])
-                         for i in range(0, len(level), 2)]
-                self._levels.append(level)
+            if len(level) == 1:
+                break
+            level = [_pair(level[i], level[i + 1])
+                     for i in range(0, len(level), 2)]
 
     def proof(self, index: int):
         """Return an inclusion proof for the leaf at ``index``.

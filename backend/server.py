@@ -14,13 +14,14 @@ from flask_cors import CORS
 from . import crypto
 from .state import ZERO_ADDRESS
 from .storage import read_json, atomic_write_json
+from .merkle import MerkleTree
 from .transaction import Transaction
 from .templates import template_catalog, get_template, TEMPLATES
 
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "frontend")
 PAGES = ["index", "wallet", "txpool", "explorer", "deploy", "interact",
-         "nodes", "network", "stats", "admin", "templates"]
+         "nodes", "network", "stats", "admin", "templates", "claim"]
 
 
 def _json(payload, status=200):
@@ -501,6 +502,74 @@ def create_app(node):
         atomic_write_json(os.path.join(node.paths.root,
                                        "custom_templates.json"), custom)
         return _json({"ok": True, "name": name})
+
+    # ================================================================== #
+    # Merkle whitelist (airdrop eligibility proofs)
+    # ================================================================== #
+    def _whitelist_tree(addresses):
+        """Build the whitelist Merkle tree used by the merkle_claim template.
+
+        Leaf order is the sorted, de-duplicated address list; each leaf is the
+        raw SHA-256 digest of the address string, matching ``sha256_hex(addr)``
+        inside contracts.
+        """
+        clean = []
+        seen = set()
+        for a in addresses:
+            a = str(a).strip()
+            if not crypto.is_valid_address(a):
+                return None, f"非法地址: {a}"
+            if a not in seen:
+                seen.add(a)
+                clean.append(a)
+        if not clean:
+            return None, "白名单为空"
+        clean.sort()
+        leaves = [crypto.sha256(a) for a in clean]
+        return (clean, MerkleTree(leaves)), None
+
+    @app.post("/api/merkle/whitelist")
+    def merkle_whitelist():
+        """Given an address list, return the Merkle root and per-address proofs."""
+        data = request.get_json(force=True, silent=True) or {}
+        addresses = data.get("addresses")
+        if isinstance(addresses, str):
+            addresses = addresses.replace(",", "\n").split()
+        if not isinstance(addresses, list):
+            return _json({"ok": False, "error": "addresses 必须是数组或换行/逗号分隔文本"}, 400)
+        built, err = _whitelist_tree(addresses)
+        if err:
+            return _json({"ok": False, "error": err}, 400)
+        ordered, tree = built
+        proofs = {}
+        for i, addr in enumerate(ordered):
+            # Contract-friendly format: [["R"|"L", sibling_hex], ...]
+            proofs[addr] = [[s["dir"], s["hash"]] for s in tree.proof(i)]
+        return _json({"ok": True, "root": tree.root.hex(),
+                      "count": len(ordered), "addresses": ordered,
+                      "proofs": proofs})
+
+    @app.post("/api/merkle/proof")
+    def merkle_proof():
+        """Return one address's inclusion proof against a posted whitelist."""
+        data = request.get_json(force=True, silent=True) or {}
+        addr = str(data.get("address", "")).strip()
+        addresses = data.get("addresses")
+        if isinstance(addresses, str):
+            addresses = addresses.replace(",", "\n").split()
+        if not crypto.is_valid_address(addr):
+            return _json({"ok": False, "error": "非法地址"}, 400)
+        built, err = _whitelist_tree(addresses or [])
+        if err:
+            return _json({"ok": False, "error": err}, 400)
+        ordered, tree = built
+        if addr not in ordered:
+            return _json({"ok": False, "error": "该地址不在白名单中",
+                          "root": tree.root.hex()}, 404)
+        idx = ordered.index(addr)
+        proof = [[s["dir"], s["hash"]] for s in tree.proof(idx)]
+        return _json({"ok": True, "address": addr, "root": tree.root.hex(),
+                      "index": idx, "proof": proof})
 
     # ================================================================== #
     # Stats

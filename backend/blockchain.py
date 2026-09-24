@@ -164,6 +164,14 @@ class Blockchain:
         receipt = {"txid": tx.txid, "ok": True, "error": None, "events": [],
                    "return": None, "transfers": [], "type": tx.tx_type,
                    "contract": None}
+        # Account-model nonce enforcement at execution time: a block packs
+        # whatever the pool held, but a stale/duplicated nonce must not execute
+        # (the sender's earlier tx in the same block already advanced the nonce).
+        if tx.nonce != state.nonce(tx.sender):
+            receipt["ok"] = False
+            receipt["error"] = (f"nonce {tx.nonce} != state nonce "
+                                f"{state.nonce(tx.sender)}")
+            return state, receipt
         try:
             if tx.tx_type == "transfer":
                 if state.balance(tx.sender) < tx.amount + tx.fee:

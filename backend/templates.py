@@ -237,6 +237,108 @@ def withdraw():
 ''',
     },
     {
+        "name": "merkle_claim",
+        "title": "代币空投领取（资格证明 / 期限 / 回收）",
+        "category": "金融",
+        "description": "项目方按白名单预存一批固定数量代币；名单内地址凭 Merkle 资格证明各领一次，设有截止高度，过期后项目方可一次性收回剩余代币。",
+        "constructor": [
+            {"name": "merkle_root", "type": "string", "desc": "白名单 Merkle 根（64位十六进制，由领取页面生成）"},
+            {"name": "amount_each", "type": "int", "desc": "每个合格地址可领取的固定数量"},
+            {"name": "total_slots", "type": "int", "desc": "白名单地址总数（决定代币总盘子）"},
+            {"name": "end_height", "type": "int", "desc": "领取截止高度（该高度之后不可再领）"},
+        ],
+        "functions": [
+            {"name": "claim", "desc": "凭 Merkle 资格证明领取固定数量代币", "params": ["proof"]},
+            {"name": "recover_remaining", "desc": "截止后项目方一次性收回剩余代币", "params": []},
+            {"name": "deposit", "desc": "向合约补充代币（附带 value 调用）", "params": []},
+            {"name": "info", "desc": "查询领取概况（根/单份/已领/剩余/截止高度等）", "params": []},
+            {"name": "has_claimed", "desc": "查询某地址是否已领取", "params": ["addr"]},
+        ],
+        "source": '''# 代币空投领取合约
+# 白名单地址的叶子 = sha256_hex(地址字符串)；proof 为 ["L"|"R", 兄弟节点哈希] 列表。
+def init(merkle_root, amount_each, total_slots, end_height):
+    require(state.get("owner") is None, "合约已初始化")
+    merkle_root = str(merkle_root)
+    require(len(merkle_root) == 64, "Merkle 根必须是 64 位十六进制")
+    amount_each = int(amount_each)
+    total_slots = int(total_slots)
+    end_height = int(end_height)
+    require(amount_each > 0, "单地址领取数量必须为正")
+    require(total_slots > 0, "白名单数量必须为正")
+    require(end_height > block_height, "截止高度必须在未来")
+    state["owner"] = msg.sender
+    state["merkle_root"] = merkle_root
+    state["amount_each"] = amount_each
+    state["total_slots"] = total_slots
+    state["end_height"] = end_height
+    state["claimed_count"] = 0
+    state["recovered"] = False
+    emit("ClaimCampaignCreated", owner=msg.sender, root=merkle_root,
+         amount_each=amount_each, total_slots=total_slots,
+         total_amount=amount_each * total_slots, end_height=end_height)
+
+def deposit():
+    require(state.get("recovered", False) is False, "活动已结束并回收")
+    require(msg.value > 0, "存入金额必须为正")
+    emit("Deposited", frm=msg.sender, amount=msg.value,
+         balance=this_balance())
+
+def claim(proof):
+    require(block_height <= state["end_height"], "已过领取截止高度")
+    require(state.get("recovered", False) is False, "剩余代币已被项目方回收")
+    require(state.get("claimed_" + msg.sender, False) is False, "该地址已领取过")
+    # 用资格证明重建 Merkle 根，与部署时公布的根比对
+    node = sha256_hex(msg.sender)
+    for step in proof:
+        side = step[0]
+        sibling = str(step[1])
+        if side == "R":
+            node = sha256_pair_hex(node, sibling)
+        else:
+            node = sha256_pair_hex(sibling, node)
+    require(node == state["merkle_root"], "资格证明无效：地址不在白名单内")
+    amount = state["amount_each"]
+    require(this_balance() >= amount, "合约代币余额不足，请联系项目方充值")
+    state["claimed_" + msg.sender] = True
+    state["claimed_count"] = state.get("claimed_count", 0) + 1
+    transfer(msg.sender, amount)
+    emit("Claimed", to=msg.sender, amount=amount,
+         height=block_height, claimed_count=state["claimed_count"])
+
+def recover_remaining():
+    require(msg.sender == state["owner"], "只有项目方可以回收")
+    require(block_height > state["end_height"], "尚未到截止高度，不能回收")
+    require(state.get("recovered", False) is False, "剩余代币已回收")
+    remaining = this_balance()
+    require(remaining > 0, "没有可回收的剩余代币")
+    state["recovered"] = True
+    transfer(state["owner"], remaining)
+    emit("Recovered", owner=state["owner"], amount=remaining,
+         claimed_count=state.get("claimed_count", 0), height=block_height)
+
+def has_claimed(addr):
+    return state.get("claimed_" + str(addr), False)
+
+def info():
+    claimed = state.get("claimed_count", 0)
+    slots = state["total_slots"]
+    return {
+        "owner": state["owner"],
+        "merkle_root": state["merkle_root"],
+        "amount_each": state["amount_each"],
+        "total_slots": slots,
+        "total_amount": state["amount_each"] * slots,
+        "claimed_count": claimed,
+        "remaining_slots": slots - claimed,
+        "end_height": state["end_height"],
+        "current_height": block_height,
+        "active": block_height <= state["end_height"],
+        "recovered": state.get("recovered", False),
+        "contract_balance": this_balance(),
+    }
+''',
+    },
+    {
         "name": "counter",
         "title": "计数器",
         "category": "基础",
